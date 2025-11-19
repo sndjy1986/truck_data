@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Active Units Map</title>
+  <title>Active Units Map (Debug)</title>
 
   <!-- Leaflet CSS -->
   <link
@@ -32,6 +32,8 @@
       font-family: system-ui, sans-serif;
       font-size: 13px;
       box-shadow: 0 1px 4px rgba(0,0,0,0.25);
+      max-width: 320px;
+      white-space: pre-wrap;
     }
     #legend {
       position: absolute;
@@ -85,12 +87,16 @@
   ></script>
 
   <script>
-    // Your XML feed URL
-    const DATA_URL = "https://vanguard.emsanyware.com/loadVehicles.php?_=1763521620670";
-
+    const DATA_URL = "https://vanguard.emsanyware.com/loadVehicles.php?_=1763521620556";
     const statusEl = document.getElementById("status");
 
-    // Rough center over SC
+    // Show any uncaught JS errors in the status box
+    window.addEventListener("error", (e) => {
+      console.error("Window error:", e.error || e.message);
+      statusEl.textContent = "JS error: " + (e.error?.message || e.message);
+    });
+
+    // Basic map, centered over SC
     const map = L.map("map").setView([34.2, -80.5], 7);
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -100,19 +106,12 @@
 
     let markersLayer = L.layerGroup().addTo(map);
 
-    function rgbToCss(rgbStr) {
-      // "0,255,0" -> "rgb(0,255,0)"
-      if (!rgbStr) return null;
-      return "rgb(" + rgbStr + ")";
-    }
-
     function statusColorFromAttrs(colorAttr, vehStatusText) {
-      // First, try the explicit color attribute from <title color="r,g,b">
       if (colorAttr) {
-        if (colorAttr === "0,255,0") return "green";        // Available / At Post
-        if (colorAttr === "225,192,0") return "orange";     // En Route
-        if (colorAttr === "255,0,0") return "red";          // At Scene / Transporting
-        if (colorAttr === "192,192,192") return "gray";     // Admin / Maintenance
+        if (colorAttr === "0,255,0") return "green";
+        if (colorAttr === "225,192,0") return "orange";
+        if (colorAttr === "255,0,0") return "red";
+        if (colorAttr === "192,192,192") return "gray";
       }
 
       const s = (vehStatusText || "").toLowerCase();
@@ -121,7 +120,7 @@
       if (s.includes("at scene") || s.includes("transport")) return "red";
       if (s.includes("administrative") || s.includes("maintenance")) return "gray";
 
-      return "blue"; // Fallback
+      return "blue";
     }
 
     function getText(el, tagName) {
@@ -133,18 +132,100 @@
       statusEl.textContent = "Loading units…";
 
       try {
+        console.log("Fetching:", DATA_URL);
+
         const res = await fetch(DATA_URL, { cache: "no-store" });
+        console.log("Response:", res);
+
         if (!res.ok) {
-          throw new Error("HTTP " + res.status);
+          throw new Error("HTTP " + res.status + " " + res.statusText);
         }
 
         const xmlText = await res.text();
+        console.log("XML sample:", xmlText.slice(0, 500));
+
         const parser = new DOMParser();
         const xmlDoc = parser.parseFromString(xmlText, "application/xml");
 
+        // Check for parser error (e.g. if login page HTML comes back instead of XML)
+        const parserError = xmlDoc.getElementsByTagName("parsererror")[0];
+        if (parserError) {
+          const msg = parserError.textContent || "Unknown XML parse error";
+          throw new Error("XML parse error: " + msg.slice(0, 200));
+        }
+
         const items = Array.from(xmlDoc.getElementsByTagName("item"));
-        console.log("Units count:", items.length);
+        console.log("Items found:", items.length);
 
         markersLayer.clearLayers();
 
-        if (!items.
+        if (!items.length) {
+          statusEl.textContent = "No <item> elements found in feed.";
+          return;
+        }
+
+        const bounds = [];
+
+        items.forEach((item) => {
+          const latLon = getText(item, "LatLon");
+          if (!latLon) return;
+
+          const [latStr, lonStr] = latLon.split(",");
+          const lat = parseFloat(latStr);
+          const lng = parseFloat(lonStr);
+          if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+
+          const id = getText(item, "ID");
+          const titleEl = item.getElementsByTagName("title")[0];
+          const titleText = titleEl ? titleEl.textContent.trim() : "";
+          const titleColorAttr = titleEl ? titleEl.getAttribute("color") : null;
+
+          const description = getText(item, "description");
+          const companyName = getText(item, "CompanyName");
+          const vehStatus = getText(item, "VehStatus");
+          const vehicleStatusDetail = getText(item, "VehicleStatus");
+          const startDateTime = getText(item, "StartDateTime");
+
+          const markerColor = statusColorFromAttrs(titleColorAttr, vehStatus);
+
+          const marker = L.circleMarker([lat, lng], {
+            radius: 7,
+            weight: 2,
+            color: markerColor,
+            fillColor: markerColor,
+            fillOpacity: 0.9
+          });
+
+          const popupHtml = `
+            <strong>${titleText || ("Unit " + id)}</strong><br/>
+            ${companyName ? companyName + "<br/>" : ""}
+            Status: ${vehStatus || "N/A"}<br/>
+            Detail: ${vehicleStatusDetail || "N/A"}<br/>
+            <small>${description || ""}</small><br/>
+            <small>Start: ${startDateTime || "N/A"}</small><br/>
+            <small>Lat: ${lat.toFixed(5)}, Lng: ${lng.toFixed(5)}</small>
+          `;
+
+          marker.bindPopup(popupHtml);
+          marker.addTo(markersLayer);
+
+          bounds.push([lat, lng]);
+        });
+
+        if (bounds.length) {
+          map.fitBounds(bounds, { padding: [40, 40] });
+          statusEl.textContent = `Loaded ${bounds.length} units.`;
+        } else {
+          statusEl.textContent = "No units had valid coordinates.";
+        }
+      } catch (err) {
+        console.error("loadUnits error:", err);
+        statusEl.textContent = "Failed to load units:\n" + err.message;
+      }
+    }
+
+    loadUnits();
+    setInterval(loadUnits, 30000);
+  </script>
+</body>
+</html>
